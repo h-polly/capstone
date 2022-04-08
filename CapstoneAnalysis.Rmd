@@ -1,0 +1,400 @@
+---
+title: "Capstone Analysis"
+author: "Polly Haun"
+date: "2/3/2022"
+output: html_document
+---
+
+#Load packages and libraries 
+#Import NHANES 2017-2018 data using nhanesA package and create data frame
+
+```{r setup, include=FALSE}
+pacman::p_load(survival, ggfortify, survminer, readxl, ggplot2, 
+               tidyverse, lmtest, table1, odds.n.ends, nhanesA, openxlsx, car, 
+               nnet, blorr)
+
+nhanesTables("EXAM", 2017)
+nhanesTables("DEMO", 2017)
+nhanesTables("QUESTIONNAIRE", 2017)
+nhanesTableVars("QUESTIONNAIRE", "IMQ_J")
+nhanesTableVars("DEMO", "DEMO_J")
+demo <- nhanes("DEMO_J") #demographics
+imq <- nhanes("IMQ_J") #immunizations
+hiq <- nhanes("HIQ_J") #health insurance
+inc <- nhanes("INQ_J") #income
+huq <- nhanes("HUQ_J") #hospital utilization and access to health care
+
+#create data frame
+nhanes1 <- merge(demo,imq)
+nhanes2 <- merge(hiq, inc)
+nhanes3 <- merge(nhanes2, huq)
+nhanes <- merge(nhanes1, nhanes3)
+
+options(digits=4)
+
+#rename variables
+#nhanes <- nhanesTranslate("DEMO_J", "RIAGENDR", data=demo)
+#nhanes <- nhanesTranslate("DEMO_J", "RIDRETH3", data=demo)
+#nhanes <- nhanesTranslate("DEMO_J", "DMDEDUC3", data=demo)
+#nhanes <- nhanesTranslate("DEMO_J", "DMDEDUC2", data=demo)
+#nhanes <- nhanesTranslate("IMQ_J", "IMQ060")
+#summary(nhanes)
+
+#create smaller data frame with only people 18-26 years old
+nhanes <- nhanes %>%
+  filter(RIDAGEYR %in% (18:26))
+```
+
+#Data wrangling
+#Rename and recode variables
+```{r}
+
+#change column names 
+nhanes <- nhanes %>%
+  rename(gender = "RIAGENDR",
+         age = "RIDAGEYR",
+        race = "RIDRETH3",
+          education1 = "DMDEDUC2",
+          education2 = "DMDEDUC3",
+         householdIncome = "INDHHIN2",
+          hpvFemale = "IMQ060",
+          hpvMale = "IMQ070",
+          hpvDoses = "IMQ100",
+        ageAtVax = "IMQ090",
+        place = "HUQ030")
+
+#recode gender
+nhanes<-nhanes %>%
+  mutate(gender=case_when(gender %in% "1" ~ 0,
+                          gender %in% "2" ~ 1))
+nhanes$gender<-factor(nhanes$gender, levels=c(0:1), labels=c("Male", "Female"))
+
+#recode race
+nhanes<-nhanes%>%
+  mutate(race=case_when(race %in% "3" ~ 0,
+                         race %in% c("1", "2") ~ 1,
+                         race %in% "4" ~ 2, 
+                        race %in% "6" ~ 3,
+                        race %in% "7" ~ 4))
+nhanes$race<-factor(nhanes$race, levels=c(0:4), labels=c("Non-Hispanic White", "Hispanic or Latino", "Black or African American", "Asian", "Other"))
+table(nhanes$race)
+
+#recode binary vaccine variables into single variable  
+nhanes<-nhanes %>%
+  mutate(hpvShot=case_when(hpvFemale %in% "2" ~ 0,
+                           hpvMale %in% "2" ~ 0,
+                           hpvFemale %in% "1" ~ 1,
+                           hpvMale %in% "1" ~ 1))
+nhanes$hpvShot<-factor(nhanes$hpvShot, levels=c(0:1), labels=c("No", "Yes"))
+table(nhanes$hpvShot)
+
+#code missing values for hpvDoses
+nhanes$hpvDoses[nhanes$hpvDoses == 9] <- NA 
+nhanes$ageAtVax[nhanes$ageAtVax == 999] <- NA
+
+#recode education into a single variable
+table(nhanes$DMDEDUC2)
+table(nhanes$DMDEDUC3)
+nhanes<-nhanes %>%
+  mutate(edu=case_when(education1 %in% c("1", "2") ~ 0,
+                           education1 %in% "3" ~ 1,
+                           education1 %in% "4" ~ 2,
+                           education1 %in% "5" ~ 3,
+                          education2 %in% c("9", "10", "11", "12") ~ 0,
+                          education2 %in% c("13","14") ~ 1,
+                          education2 %in% "15" ~ 2))
+nhanes$edu<-factor(nhanes$edu, levels=c(0:3), labels=c("Less than high school", "High school or GED", "Some college", "College or above"))
+table(nhanes$edu)
+
+#recode insurance into a single variable
+nhanes<-nhanes %>%
+  mutate(insur=case_when(HIQ031D %in% "17" ~ 1, 
+                         HIQ031F %in% "19" ~ 2, 
+                         HIQ031H %in% "21" ~ 2, 
+                         HIQ031I %in% "21" ~ 2,
+                         HIQ031J %in% "21" ~ 2,
+                         HIQ011 %in% "1" ~ 0,
+                         HIQ011 %in% "2" ~ 3))
+table(nhanes$insur)
+nhanes$insur<-factor(nhanes$insur, levels=c(0:3), labels=c("Private", "Medicaid", "Other Insurance", "None"))
+
+#recode routine place for healthcare
+nhanes<-nhanes %>%
+  mutate(place=case_when(place %in% c("1", "3") ~ 0,
+                                place %in% "2" ~ 1))
+nhanes$place<-factor(nhanes$place, levels=c(0:1), labels=c("Yes", "No"))
+
+
+#need to exclude values lower than 9 for ageAtVax
+#there is probably a more parsimonious way to do this but this is what's working now
+nhanes$ageAtVax <- na_if(nhanes$ageAtVax, "2")
+nhanes$ageAtVax <- na_if(nhanes$ageAtVax, "7")
+nhanes$ageAtVax <- na_if(nhanes$ageAtVax, "8")
+table(nhanes$ageAtVax)
+
+#filter to exclude HPV shots where the value is missing (n=129)
+nhanes <- nhanes %>%
+  filter(hpvShot %in% c("Yes", "No"))
+
+nhanes <- nhanes[!is.na(nhanes$edu),]
+nhanes <- nhanes[!is.na(nhanes$insur),]
+
+```
+
+#create Table1
+```{r}
+
+nhanes$age <- as.numeric(nhanes$age) 
+nhanes$ageAtVax <- as.numeric(nhanes$ageAtVax)
+nhanes$hpvDoses <- factor(nhanes$hpvDoses)  
+
+label(nhanes$age) <-  "Age" 
+label(nhanes$race) <- "Race/Ethnicity"
+label(nhanes$edu) <- "Education"
+label(nhanes$insur) <- "Insurance"
+label(nhanes$place) <- "Regular Place for Healthcare"
+label(nhanes$gender) <- "Gender"
+
+pvalue <- function(x, ...) {
+    # Construct vectors of data y, and groups (strata) g
+    y <- unlist(x)
+    g <- factor(rep(1:length(x), times=sapply(x, length)))
+    if (is.numeric(y)) {
+        # For numeric variables, perform a standard 2-sample t-test
+        p <- t.test(y ~ g)$p.value
+    } else {
+        # For categorical variables, perform a chi-squared test of independence
+        p <- chisq.test(table(y, g))$p.value
+    }
+    # Format the p-value, using an HTML entity for the less-than sign.
+    # The initial empty string places the output on the line below the variable label.
+    c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))}
+
+table(nhanes$ageAtVax)
+class(nhanes$ageAtVax)
+
+table1 <- table1(~age + race + edu + insur + place + gender|hpvShot, overall= FALSE, rowlabelhead="Variable", extra.col=list("P-value"=pvalue), data=nhanes)
+table1
+
+table1T <- table1(~age + race + edu + insur + place + gender|hpvShot, overall= "Total", rowlabelhead="Variable", data=nhanes)
+
+#openxlsx::write.xlsx(table1, "C:/Users/polly/Box/Class Files/Capstone/Table1.xlsx")
+#openxlsx::write.xlsx(table1T, "C:/Users/polly/Box/Class Files/Capstone/Table1T.xlsx")
+```
+
+
+#logistic regression of gender and HPV vaccination status (yes/no) 
+#Analyze "Place" variable to see if it is an effect modifier or confounder of the relationship
+
+```{r}
+unadjModel1 <- glm(hpvShot ~ gender, data=nhanes, family="binomial")
+summary(unadjModel1)
+odds.n.ends(unadjModel1)
+
+#chi-squared = 61.77, p < 0.001, df = 1
+#model sensitivity = 55.4%, model specificity = 73.1%
+#crude OR = 3.39 (95% CI 2.48-4.62)
+#Among the study population, people who had received the HPV vaccine were 3.38 times more likely to be female than male. 
+
+unadjModel2 <- glm(hpvShot ~ gender + place, data=nhanes, family="binomial")
+summary(unadjModel2)
+odds.n.ends(unadjModel2)
+
+#chi-squared = 101.22, p < 0.001, df = 2
+#model sensitivity = 87.0%, model specificity = 40.2%
+#adjusted OR = 2.92 (95% CI 2.55-4.03)
+
+#include interaction term 
+unadjModel3 <- glm(hpvShot ~ gender + place + hpvShot*place, data=nhanes, family="binomial")
+summary(unadjModel3)
+odds.n.ends(unadjModel3)
+#interaction term is not significant, so no effect modification
+
+#stratum specific values for place
+placeYes <- nhanes %>%
+  filter(place == "Yes")
+placeNo <- nhanes %>%
+  filter(place == "No")
+
+ssYes <- glm(hpvShot ~ gender, data=placeYes, family="binomial")
+summary(ssYes)
+odds.n.ends(ssYes)
+#stratum specific OR for Yes place for health care = 2.79 (95% CI 1.89-4.16)
+
+ssNo <- glm(hpvShot ~ gender, data=placeNo, family="binomial")
+summary(ssNo)
+odds.n.ends(ssNo)
+#stratum specific OR for No place for health care = 3.18 (95% CI 1.83-5.58)
+
+```
+
+#adjusted model
+
+```{r}
+adjModel1 <- glm(hpvShot ~ gender + place + age + race + edu + insur, data=nhanes, family="binomial")
+summary(adjModel1)
+odds.n.ends(adjModel1)
+#chi-squared = 115.91, p < 0.001, df = 13
+#model sensitivity = 55.1%, model specificity = 76.4%
+#adjusted OR = 2.78 (95% CI 1.99-3.90)
+```
+
+#Test Model 1 for assumptions
+
+```{r}
+#Box-Tidwell Test
+#linearity for age, which is the only continuous predictor
+nhanes <- nhanes %>%
+  mutate(age.times.logage = age * log(age)) #create term to test linearity
+
+boxTidwellAge <- glm(hpvShot ~ age + age.times.logage, data=nhanes, family="binomial") #Box Tidwell technique, test the assumption of linearity
+
+summary(boxTidwellAge)
+#findings are not significant, so the assumption of linearity is met 
+
+```
+
+```{r}
+#Cook's Distance
+plot(adjModel1, which=4, id.n=5, col="red") 
+#influential observations are: 83, 225, 228, 377, 695
+
+#set cut off point to 0.010
+cutoff <- 0.010
+obs_no <- as.data.frame(cooks.distance(adjModel1)) %>%
+  mutate(obs_no=row_number()) %>%
+  filter(`cooks.distance(adjModel1)` > cutoff)
+
+#Let's exclude the values shown in the Cook's D plot, and see how the models compare.
+
+model1.modex <- update(adjModel1,subset=c(-obs_no$obs_no))
+
+#compare coefficients between models with and without influential observations, #caveat model number of observations is not the same
+compareCoefs(adjModel1, model1.modex)
+summary(model1.modex)
+odds.n.ends(model1.modex)
+
+#values for the model excluding observation 377
+#chi-squared = 115.67, p < 0.001, df = 13
+#model sensitivity = 54.8%, model specificity = 75.6%
+#adjusted OR = 2.76 (95% CI 1.98-3.88)
+#model is not signficantly different when excluding observation 377, so it will remain in the data frame
+
+```
+
+```{r}
+#multicollinearity
+vif(adjModel1)
+#values are all <2, so multicollinearity is not present
+
+#Hosmer Lemeshow test for goodness of fit
+blr_test_hosmer_lemeshow(adjModel1)
+#p value is >0.05 so model is not a bad fit
+```
+
+#Model 2
+#Create a Table 1 for this model 
+```{r}
+#filter to only include values where the HPV dose is known 
+nhanesDose <- nhanes %>%
+  filter(hpvDoses %in% c(1, 2, 3))
+
+#mutate hpvDoses variable so that it is binary
+#1 or 2 doses = 0; 3 doses (up to date) = 1
+nhanesDose<-nhanesDose %>%
+  mutate(hpvDoses=case_when(hpvDoses %in% c("1","2") ~ 0,
+                          hpvDoses %in% "3" ~ 1))
+nhanesDose$hpvDoses<-factor(nhanesDose$hpvDoses, levels=c(0:1), labels=c("1 or 2 Doses", "3 Doses"))
+
+pvalue <- function(x, ...) {
+    # Construct vectors of data y, and groups (strata) g
+    y <- unlist(x)
+    g <- factor(rep(1:length(x), times=sapply(x, length)))
+    if (is.numeric(y)) {
+        # For numeric variables, perform a standard 2-sample t-test
+        p <- t.test(y ~ g)$p.value
+    } else {
+        # For categorical variables, perform a chi-squared test of independence
+        p <- chisq.test(table(y, g))$p.value
+    }
+    # Format the p-value, using an HTML entity for the less-than sign.
+    # The initial empty string places the output on the line below the variable label.
+    c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))}
+
+table2 <- table1(~age + race + edu + insur+ place
+                    + gender |hpvDoses, overall= F,
+      rowlabelhead="Variable", extra.col=list("P-value"=pvalue), data=nhanesDose)
+table2T <- table1(~age + race + edu + insur+ place
+                    + gender |hpvDoses, overall= "Total",
+      rowlabelhead="Variable", data=nhanesDose)
+#openxlsx::write.xlsx(table2, "C:/Users/polly/Box/Class Files/Capstone/Table2.xlsx")
+#openxlsx::write.xlsx(table2T, "C:/Users/polly/Box/Class Files/Capstone/Table2T.xlsx")
+
+```
+
+
+```{r}
+unadjModel4 <- glm(hpvDoses ~ gender, data=nhanesDose, family="binomial")
+summary(unadjModel4)
+odds.n.ends(unadjModel4)
+
+#chi-squared = 6.84, p < 0.01, df = 1
+#model sensitivity = 79.1%, model specificity = 35.3%
+#crude OR = 2.07 (95% CI 1.20-3.62)
+#Among the study population, people who had completed the HPV vaccine series were 2.07 times more likely to be female than male. 
+
+#include interaction term 
+unadjModel5 <- glm(hpvDoses ~ gender + place + hpvDoses*place, data=nhanesDose, family="binomial")
+summary(unadjModel5)
+odds.n.ends(unadjModel5)
+#interaction term is not significant
+
+adjModel2 <- glm(hpvDoses ~ gender + place + age + race + edu + insur, data=nhanesDose, family="binomial")
+summary(adjModel2)
+odds.n.ends(adjModel2)
+#chi-squared = 23.60, p < 0.05, df = 13
+#model sensitivity = 74.3%, model specificity = 48.7%
+#adjusted OR = 2.10 (95% CI 1.16-3.87)
+```
+#Test Model 2 for assumptions
+```{r}
+#Box-Tidwell Test
+#linearity for age, which is the only continuous predictor
+nhanesDose <- nhanesDose %>%
+  mutate(age.times.logage = age * log(age)) #create term to test linearity
+
+boxTidwellAge2 <- glm(hpvDoses ~ age + age.times.logage, data=nhanesDose, family="binomial") #Box Tidwell technique, test the assumption of linearity
+
+summary(boxTidwellAge2)
+#findings are not significant (p>0.05), so the assumption of linearity is met
+
+#Cook's Distance
+plot(adjModel2, which=4, id.n=5, col="red") 
+#influential observations are: 19, 46, 128, 143, 254
+
+#set cut off point to 0.015
+cutoff <- 0.015
+obs_no <- as.data.frame(cooks.distance(adjModel2)) %>%
+  mutate(obs_no=row_number()) %>%
+  filter(`cooks.distance(adjModel2)` > cutoff)
+
+#Let's exclude the values shown in the Cook's D plot, and see how the models compare.
+
+model2.modex <- update(adjModel2,subset=c(-obs_no$obs_no))
+
+#compare coefficients between models with and without influential observations, #caveat model number of observations is not the same
+compareCoefs(adjModel2, model2.modex)
+summary(model2.modex)
+odds.n.ends(model2.modex)
+#Chi-squared increases slightly without obs 19
+#Because it does not signifcantly change the model, I will not exclude the obs
+
+#multicollinearity
+vif(adjModel2)
+#no values are >2 so multicollinearity is not present
+
+#Hosmer Lemeshow test for goodness of fit
+blr_test_hosmer_lemeshow(adjModel2)
+#p is not significant (p>0.05) indicating that it is not a bad fit
+```
+
